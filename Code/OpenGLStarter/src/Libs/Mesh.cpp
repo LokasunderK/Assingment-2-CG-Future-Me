@@ -37,8 +37,11 @@ static GLuint LoadGLTexture(const std::string& filepath)
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    // Tiny textures are pixel art (e.g. the Minecraft skeleton): keep texels crisp
+    const bool pixelArt = (width <= 128 && height <= 128);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, pixelArt ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    pixelArt ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
     glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
@@ -467,22 +470,26 @@ void Mesh::RenderWithMaterials(GLint useTextureLoc, GLint textureLoc, GLint obje
     for (const auto& sub : subMeshes) 
     {
         auto it = materials.find(sub.materialName);
-        if (it != materials.end() && it->second.hasTexture && it->second.textureID != 0) 
+
+        // Always send this material's Kd so transparent texels fall back to
+        // the right colour instead of whatever the previous submesh left behind.
+        glm::vec3 col(0.8f);
+        if (it != materials.end())
+        {
+            col = it->second.diffuseColor;
+        }
+        glUniform3fv(objectColourLoc, 1, glm::value_ptr(col));
+
+        if (it != materials.end() && it->second.hasTexture && it->second.textureID != 0)
         {
             glUniform1i(useTextureLoc, GL_TRUE);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, it->second.textureID);
             glUniform1i(textureLoc, 0);
-        } 
-        else 
+        }
+        else
         {
             glUniform1i(useTextureLoc, GL_FALSE);
-            glm::vec3 col(0.8f);
-            if (it != materials.end()) 
-            {
-                col = it->second.diffuseColor;
-            }
-            glUniform3fv(objectColourLoc, 1, glm::value_ptr(col));
         }
 
         glDrawElements(GL_TRIANGLES, sub.indexCount, GL_UNSIGNED_INT, 

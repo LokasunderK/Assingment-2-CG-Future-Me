@@ -41,7 +41,10 @@ int Window::initialise()
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
 
-    mainWindow = glfwCreateWindow(width, height, "OpenGL Starter", nullptr, nullptr);
+    // Fixed-size window so the rendered/captured image stays exactly 800x600.
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    mainWindow = glfwCreateWindow(width, height, "FUTURE ME", nullptr, nullptr);
 
     if (mainWindow == nullptr)
     {

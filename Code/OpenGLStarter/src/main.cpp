@@ -28,18 +28,25 @@
 const GLint WIDTH = 800;
 const GLint HEIGHT = 600;
 
+// Submission file name: Assignment2_studentID_yourPairID.png
+// TODO: replace with your real student ID and pair ID before submitting
+const std::string STUDENT_ID = "studentID";
+const std::string PAIR_ID = "yourPairID";
+const std::string SCREENSHOT_NAME =
+    "Assignment2_" + STUDENT_ID + "_" + PAIR_ID + ".png";
+
 std::vector<Mesh *> meshList;
 std::vector<Shader *> shaderList;
 
 float fov = 45.0f;
-float yaw = 86.0f;
-float pitch = 5.0f;
+float yaw = 68.5f;
+float pitch = 13.5f;
 
 // Default camera setup: framed to show the sitting skeleton on cardboard in foreground
 // and the Microsoft building with corporate logo in background
-const glm::vec3 DEFAULT_CAM_POS(-2.8f, 2.3f, -12.5f);
-const float DEFAULT_YAW = 86.0f;
-const float DEFAULT_PITCH = 5.0f;
+const glm::vec3 DEFAULT_CAM_POS(-4.9f, 0.9f, -13.2f);
+const float DEFAULT_YAW = 68.5f;
+const float DEFAULT_PITCH = 13.5f;
 const float DEFAULT_FOV = 45.0f;
 
 // -------------------------------------------------------
@@ -181,8 +188,11 @@ void RenderLitPass(Shader &shader, const glm::mat4 &view,
 
   meshList[0]->RenderWithMaterials(useTextureLoc, textureLoc, objectColourLoc);
 
+  // Unbind the shadow map (unit 1) and material texture (unit 0)
+  glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_2D, 0);
   glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 // -------------------------------------------------------
@@ -347,11 +357,15 @@ int main(int argc, char *argv[]) {
     // Capture screenshot on 'P' key press (or during --screenshot-and-exit)
     frameCounter++;
     if (autoExit && frameCounter == 5) {
-      SaveScreenshot("Assignment2_screenshot.png", bufW, bufH);
+      SaveScreenshot(SCREENSHOT_NAME, bufW, bufH);
     }
-    if (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS) {
-      SaveScreenshot("Assignment2_screenshot.png", bufW, bufH);
+    // Save once per key press instead of every frame while P is held
+    static bool pWasDown = false;
+    const bool pDown = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
+    if (pDown && !pWasDown) {
+      SaveScreenshot(SCREENSHOT_NAME, bufW, bufH);
     }
+    pWasDown = pDown;
 
     mainWindow.swapBuffers();
 

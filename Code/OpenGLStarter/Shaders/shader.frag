@@ -80,8 +80,9 @@ void main()
     vec3 viewDir = normalize(viewPos - FragPos);
 
     float diffuse = max(dot(normal, lightDir), 0.0);
-    vec3 reflectDir = reflect(-lightDir, normal);
-    float specular = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
+    // Blinn-Phong specular: use the half vector between light and view directions
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float specular = pow(max(dot(normal, halfwayDir), 0.0), 64.0);
 
     float shadow = ShadowCalculation(FragPosLightSpace);
     vec3 ambientTerm = 0.35 * baseColour;
