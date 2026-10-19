@@ -1,92 +1,94 @@
 #version 330 core
 
+in vec4 vCol;
 in vec2 TexCoord;
-in vec3 FragPos;
 in vec3 Normal;
-in vec4 FragPosLightSpace;
+in vec3 FragPos;
+in vec4 fragPosLightSpace;
+
 out vec4 colour;
 
 uniform vec3 lightColour;
-uniform vec3 lightDirection;
+uniform vec3 lightPos;
 uniform vec3 viewPos;
-uniform bool isLight;
 
 uniform sampler2D texture_data;
 uniform sampler2D shadowMap;
 uniform bool useTexture;
 uniform vec3 objectColour;
-uniform bool isDepthPass;
 
-float ShadowCalculation(vec4 fragPosLightSpace)
+vec3 ambientLight()
 {
-    // Perspective divide and map the light's NDC coordinates into [0, 1].
+    float ambientStrength = 0.3;
+    vec3 ambient = lightColour * ambientStrength;
+    return ambient;
+}
+
+vec3 diffuseLight()
+{
+    float diffuseStrength = 0.5;
+    vec3 norm = normalize(Normal);
+    vec3 lightDir = normalize(lightPos - FragPos);
+
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = lightColour * diff * diffuseStrength;
+    return diffuse;
+}
+
+vec3 specularLight()
+{
+    float specularStrength = 0.8;
+    float shininess = 256.0;
+
+    vec3 viewDir  = normalize(viewPos - FragPos);
+    vec3 norm     = normalize(Normal);
+    vec3 lightDir = normalize(lightPos - FragPos);
+
+    // Blinn-Phong
+    vec3 halfDir = normalize((lightDir + viewDir) / 2.0);
+    float spec = pow(max(dot(halfDir, norm), 0.0), shininess);
+
+    vec3 specular = lightColour * spec * specularStrength;
+    return specular;
+}
+
+float ShadowCalculation()
+{
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-
-    // Treat points outside the light frustum as unshadowed.
-    if (projCoords.z > 1.0 || projCoords.z < 0.0 ||
-        projCoords.x < 0.0 || projCoords.x > 1.0 ||
-        projCoords.y < 0.0 || projCoords.y > 1.0)
-        return 0.0;
-
-    // A small depth bias prevents self-shadowing (shadow acne).
-    const float bias = 0.003;
-    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+    float closestDepth = texture(shadowMap, projCoords.xy).r;
+    float currentDepth = projCoords.z;
+    float bias = 0.005;
     float shadow = 0.0;
-
-    // 3x3 percentage-closer filtering softens shadow-map aliasing.
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
     for (int x = -1; x <= 1; ++x)
     {
         for (int y = -1; y <= 1; ++y)
         {
-            float closestDepth = texture(shadowMap,
-                projCoords.xy + vec2(x, y) * texelSize).r;
-            shadow += (projCoords.z - bias > closestDepth) ? 1.0 : 0.0;
+            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
         }
     }
-    return shadow / 9.0;
+    shadow /= 9.0;
+    if (projCoords.z > 1.0)
+        shadow = 0.0;
+    return shadow;
 }
 
 void main()
 {
-    // Pass 1: Depth map generation only needs depth value (handled by GPU)
-    if (isDepthPass)
-    {
-        return;
-    }
-
-    if (isLight)
-    {
-        colour = vec4(lightColour, 1.0);
-        return;
-    }
-
-    vec3 baseColour = objectColour;
+    vec4 baseColour;
     if (useTexture)
     {
-        vec4 texCol = texture(texture_data, TexCoord);
-        if (texCol.a < 0.1)
-        {
-            baseColour = objectColour;
-        }
-        else
-        {
-            baseColour = texCol.rgb;
-        }
+        baseColour = texture(texture_data, TexCoord);
+    }
+    else
+    {
+        baseColour = vec4(objectColour, 1.0);
     }
 
-    vec3 normal = normalize(Normal);
-    vec3 lightDir = normalize(lightDirection);
-    vec3 viewDir = normalize(viewPos - FragPos);
+    float shadow = ShadowCalculation();
+    vec3 lighting = ambientLight() + (1.0 - shadow) * (diffuseLight() + specularLight());
 
-    float diffuse = max(dot(normal, lightDir), 0.0);
-    // Blinn-Phong specular: use the half vector between light and view directions
-    vec3 halfwayDir = normalize(lightDir + viewDir);
-    float specular = pow(max(dot(normal, halfwayDir), 0.0), 64.0);
-
-    float shadow = ShadowCalculation(FragPosLightSpace);
-    vec3 ambientTerm = 0.35 * baseColour;
-    vec3 directTerm = (1.0 - shadow) *
-        (0.65 * diffuse * lightColour * baseColour + 0.20 * specular * lightColour);
-    colour = vec4(ambientTerm + directTerm, 1.0);
+    colour = baseColour * vec4(lighting, 1.0);
 }

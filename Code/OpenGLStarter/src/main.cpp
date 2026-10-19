@@ -7,11 +7,12 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <cmath>
+#include <cstring>
 #include <filesystem>
-#include <vector>
 #include <iostream>
 #include <string>
-#include <cstring>
+#include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_WINDOWS_UTF8
@@ -38,12 +39,21 @@ const std::string SCREENSHOT_NAME =
 std::vector<Mesh *> meshList;
 std::vector<Shader *> shaderList;
 
+// Separate depth shader (week13 style)
+Shader *depthShader;
+
+// Light indicator shader (week13 style: same as lightShader)
+Shader *lightShader;
+
 float fov = 45.0f;
 float yaw = 68.5f;
 float pitch = 13.5f;
+glm::vec3 lightColour = glm::vec3(0.9f, 0.95f, 1.0f); // Cool moonlight
+glm::vec3 lightPos =
+    glm::vec3(-1.5f, 3.5f, -8.0f); // In front of building, illuminates skeleton
+glm::vec3 cameraPos = glm::vec3(-4.9f, 0.9f, -13.2f);
 
-// Default camera setup: framed to show the sitting skeleton on cardboard in foreground
-// and the Microsoft building with corporate logo in background
+// Default camera (week13 uses globals for these too)
 const glm::vec3 DEFAULT_CAM_POS(-4.9f, 0.9f, -13.2f);
 const float DEFAULT_YAW = 68.5f;
 const float DEFAULT_PITCH = 13.5f;
@@ -70,7 +80,7 @@ void SaveScreenshot(const std::string &filename, int width, int height) {
 // Input helpers
 // -------------------------------------------------------
 void ScrollCallback(GLFWwindow *window, double /*xoffset*/, double yoffset) {
-  fov -= static_cast<float>(yoffset) * 2.0f;
+  fov -= (float)yoffset * 2.0f;
   fov = glm::clamp(fov, 10.0f, 90.0f);
 }
 
@@ -81,15 +91,15 @@ void UpdateMouseLook(GLFWwindow *window) {
   static double lastX = mouseX;
   static double lastY = mouseY;
 
-  const float xOffset = static_cast<float>(mouseX - lastX);
-  const float yOffset = static_cast<float>(mouseY - lastY);
+  float xOffset = static_cast<float>(mouseX - lastX);
+  float yOffset = static_cast<float>(mouseY - lastY);
   lastX = mouseX;
   lastY = mouseY;
 
   if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS)
     return;
 
-  const float sensitivity = 0.2f;
+  float sensitivity = 0.2f;
   yaw += xOffset * sensitivity;
   pitch -= yOffset * sensitivity;
   pitch = glm::clamp(pitch, -89.0f, 89.0f);
@@ -118,81 +128,69 @@ void CreateObj(const std::filesystem::path &modelPath) {
   meshList.push_back(obj);
 }
 
+// Create a UV sphere (week13 cube equivalent: used as moon/light indicator)
+void CreateSphere(int stacks, int slices) {
+  std::vector<GLfloat> vertices;
+  std::vector<unsigned int> indices;
+  constexpr float pi = 3.14159265358979323846f;
+
+  for (int i = 0; i <= stacks; ++i) {
+    float phi = pi * i / stacks; // 0 .. PI
+    for (int j = 0; j <= slices; ++j) {
+      float theta = 2.0f * pi * j / slices; // 0 .. 2PI
+      float x = sinf(phi) * cosf(theta);
+      float y = cosf(phi);
+      float z = sinf(phi) * sinf(theta);
+      // pos (3) + texcoord (2) + normal (3)
+      vertices.push_back(x);
+      vertices.push_back(y);
+      vertices.push_back(z);
+      vertices.push_back((float)j / slices); // u
+      vertices.push_back((float)i / stacks); // v
+      vertices.push_back(x);                 // nx
+      vertices.push_back(y);                 // ny
+      vertices.push_back(z);                 // nz
+    }
+  }
+
+  for (int i = 0; i < stacks; ++i) {
+    for (int j = 0; j < slices; ++j) {
+      int a = i * (slices + 1) + j;
+      int b = a + slices + 1;
+      indices.push_back(a);
+      indices.push_back(b);
+      indices.push_back(a + 1);
+      indices.push_back(b);
+      indices.push_back(b + 1);
+      indices.push_back(a + 1);
+    }
+  }
+
+  Mesh *sphere = new Mesh();
+  sphere->CreateMesh(vertices.data(), indices.data(),
+                     (unsigned int)vertices.size(),
+                     (unsigned int)indices.size());
+  meshList.push_back(sphere); // index 1 = moon
+}
+
 void CreateShaders() {
-  // Unified shader handling both Depth pass and Lit pass
-  Shader *shader = new Shader();
-  shader->CreateFromFiles(shaderDirectory / "shader.vert",
-                          shaderDirectory / "shader.frag");
-  shaderList.push_back(shader); // index 0
-}
+  // Main lit shader  (week13 style: only handles lit pass with Blinn-Phong +
+  // shadow)
+  Shader *shader1 = new Shader();
+  shader1->CreateFromFiles(shaderDirectory / "shader.vert",
+                           shaderDirectory / "shader.frag");
+  shaderList.push_back(shader1); // index 0
 
-// -------------------------------------------------------
-// Scene transform helpers
-// -------------------------------------------------------
-glm::mat4 MakeModelMatrix() {
-  return glm::mat4(1.0f);
-}
+  // Separate depth shader (week13 style: dedicated shader for shadow/depth
+  // pass)
+  depthShader = new Shader();
+  depthShader->CreateFromFiles(shaderDirectory / "depthShader.vert",
+                               shaderDirectory / "depthShader.frag");
 
-// -------------------------------------------------------
-// Render passes
-// -------------------------------------------------------
-void RenderDepthPass(Shader &shader, const glm::mat4 &lightSpaceMatrix) {
-  shader.UseShader();
-  glUniform1i(shader.GetUniformLocation("isDepthPass"), GL_TRUE);
-  glUniformMatrix4fv(shader.GetUniformLocation("lightSpaceMatrix"), 1,
-                     GL_FALSE, glm::value_ptr(lightSpaceMatrix));
-
-  const glm::mat4 model = MakeModelMatrix();
-  glUniformMatrix4fv(shader.GetUniformLocation("model"), 1, GL_FALSE,
-                     glm::value_ptr(model));
-  meshList[0]->RenderMesh();
-}
-
-void RenderLitPass(Shader &shader, const glm::mat4 &view,
-                   const glm::mat4 &projection,
-                   const glm::mat4 &lightSpaceMatrix,
-                   const glm::vec3 &lightDirection, const glm::vec3 &cameraPos,
-                   const glm::vec3 &lightColour,
-                   GLuint shadowMap) {
-  shader.UseShader();
-  glUniform1i(shader.GetUniformLocation("isDepthPass"), GL_FALSE);
-
-  glUniformMatrix4fv(shader.GetUniformLocation("view"), 1, GL_FALSE,
-                     glm::value_ptr(view));
-  glUniformMatrix4fv(shader.GetUniformLocation("projection"), 1, GL_FALSE,
-                     glm::value_ptr(projection));
-  glUniformMatrix4fv(shader.GetUniformLocation("lightSpaceMatrix"), 1, GL_FALSE,
-                     glm::value_ptr(lightSpaceMatrix));
-  glUniform3fv(shader.GetUniformLocation("lightColour"), 1,
-               glm::value_ptr(lightColour));
-  glUniform3fv(shader.GetUniformLocation("lightDirection"), 1,
-               glm::value_ptr(lightDirection));
-  glUniform3fv(shader.GetUniformLocation("viewPos"), 1,
-               glm::value_ptr(cameraPos));
-  glUniform1i(shader.GetUniformLocation("isLight"), GL_FALSE);
-  glUniform1i(shader.GetUniformLocation("texture_data"), 0);
-  glUniform1i(shader.GetUniformLocation("shadowMap"), 1);
-
-  // Bind shadow map to texture unit 1
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D, shadowMap);
-
-  const glm::mat4 model = MakeModelMatrix();
-  glUniformMatrix4fv(shader.GetUniformLocation("model"), 1, GL_FALSE,
-                     glm::value_ptr(model));
-
-  // Render model with all submeshes using their respective materials & textures
-  GLint useTextureLoc = shader.GetUniformLocation("useTexture");
-  GLint textureLoc = shader.GetUniformLocation("texture_data");
-  GLint objectColourLoc = shader.GetUniformLocation("objectColour");
-
-  meshList[0]->RenderWithMaterials(useTextureLoc, textureLoc, objectColourLoc);
-
-  // Unbind the shadow map (unit 1) and material texture (unit 0)
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D, 0);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, 0);
+  // Light indicator shader (week13 style: flat colour shader for moon sphere)
+  lightShader = new Shader();
+  lightShader->CreateFromFiles(shaderDirectory / "lightShader.vert",
+                               shaderDirectory / "lightShader.frag");
 }
 
 // -------------------------------------------------------
@@ -205,6 +203,10 @@ void Cleanup() {
   for (Shader *s : shaderList)
     delete s;
   shaderList.clear();
+  delete depthShader;
+  depthShader = nullptr;
+  delete lightShader;
+  lightShader = nullptr;
 }
 
 // -------------------------------------------------------
@@ -213,17 +215,17 @@ void Cleanup() {
 int main(int argc, char *argv[]) {
   bool autoExit = false;
   for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "--screenshot-and-exit") {
+    if (std::string(argv[i]) == "--screenshot-and-exit")
       autoExit = true;
-    }
   }
 
   Window mainWindow(WIDTH, HEIGHT, 3, 3);
   if (mainWindow.initialise() != 0)
     return 1;
 
-  // Load the project model and its materials & textures
+  // Load the project model (week13: CreateObj then CreateShaders)
   CreateObj(modelDirectory / "ModelFutureMe.obj");
+  CreateSphere(24, 24); // moon sphere (week13 cube equivalent)
   CreateShaders();
 
   if (meshList.empty() || shaderList.empty()) {
@@ -232,65 +234,50 @@ int main(int argc, char *argv[]) {
   }
 
   glEnable(GL_DEPTH_TEST);
-  glClearColor(0.55f, 0.65f, 0.78f, 1.0f); // Pleasant daylight sky color
 
   GLFWwindow *window = glfwGetCurrentContext();
   glfwSetScrollCallback(window, ScrollCallback);
   glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
-  // Shadow map framebuffer
-  constexpr GLuint SHADOW_W = 2048, SHADOW_H = 2048;
-  GLuint depthMapFBO = 0, depthMap = 0;
+  // Shadow map framebuffer (week13 style: separate GLuint variables)
+  GLuint depthMapFBO;
   glGenFramebuffers(1, &depthMapFBO);
+
+  const unsigned int SHADOW_WIDTH = 1024, SHADOW_HEIGHT = 1024;
+
+  GLuint depthMap;
   glGenTextures(1, &depthMap);
   glBindTexture(GL_TEXTURE_2D, depthMap);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_W, SHADOW_H, 0,
-               GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH,
+               SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-  const GLfloat border[] = {1.f, 1.f, 1.f, 1.f};
-  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
 
   glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
                          depthMap, 0);
   glDrawBuffer(GL_NONE);
   glReadBuffer(GL_NONE);
-  const GLenum fbStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-  if (fbStatus != GL_FRAMEBUFFER_COMPLETE) {
-    std::cerr << "Shadow framebuffer incomplete (0x" << std::hex << fbStatus
-              << ")\n";
-    glDeleteFramebuffers(1, &depthMapFBO);
-    glDeleteTextures(1, &depthMap);
-    Cleanup();
-    return 1;
-  }
+  // Camera (week13 style: direction computed from yaw/pitch)
+  glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+  glm::vec3 cameraDirection;
 
-  // Camera setup
-  glm::vec3 cameraPos = DEFAULT_CAM_POS;
-  const glm::vec3 up(0.0f, 1.0f, 0.0f);
-  yaw = DEFAULT_YAW;
-  pitch = DEFAULT_PITCH;
-  fov = DEFAULT_FOV;
-
-  // Directional sun light coming from front-right (+X, +Y, -Z) shining towards building
-  const glm::vec3 lightPos(4.0f, 16.0f, -16.0f);
-  const glm::vec3 sceneTarget(-1.5f, 2.5f, -4.5f);
-  const glm::vec3 lightDirection = glm::normalize(lightPos - sceneTarget);
-  const glm::vec3 lightColour(1.0f, 0.98f, 0.92f); // Warm sunlight
-
-  float lastFrame = static_cast<float>(glfwGetTime());
+  float lastFrame = (float)glfwGetTime();
   int frameCounter = 0;
 
+  // paintComponent
   while (!mainWindow.getShouldClose()) {
     glfwPollEvents();
-    const float now = static_cast<float>(glfwGetTime());
-    const float deltaTime = now - lastFrame;
+
+    glClearColor(0.55f, 0.65f, 0.78f, 1.0f); // Daylight sky
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    float now = (float)glfwGetTime();
+    float deltaTime = now - lastFrame;
     lastFrame = now;
 
     UpdateMouseLook(window);
@@ -299,79 +286,166 @@ int main(int argc, char *argv[]) {
     if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
       yaw = DEFAULT_YAW;
       pitch = DEFAULT_PITCH;
-      fov = DEFAULT_FOV;
       cameraPos = DEFAULT_CAM_POS;
     }
 
-    // Camera direction from yaw/pitch
-    glm::vec3 camDir;
-    camDir.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-    camDir.y = sin(glm::radians(pitch));
-    camDir.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-    camDir = glm::normalize(camDir);
+    // Camera direction from yaw/pitch (week13 style)
+    cameraDirection.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+    cameraDirection.y = sin(glm::radians(pitch));
+    cameraDirection.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+    cameraDirection = glm::normalize(cameraDirection);
 
-    const glm::vec3 camRight = glm::normalize(glm::cross(camDir, up));
-    const float speed = 4.0f * deltaTime;
-
+    glm::vec3 cameraRight = glm::normalize(glm::cross(cameraDirection, up));
+    float speed = 4.0f * deltaTime;
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-      cameraPos += camDir * speed;
+      cameraPos += cameraDirection * speed;
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-      cameraPos -= camDir * speed;
+      cameraPos -= cameraDirection * speed;
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-      cameraPos -= camRight * speed;
+      cameraPos -= cameraRight * speed;
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-      cameraPos += camRight * speed;
+      cameraPos += cameraRight * speed;
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
       cameraPos += up * speed;
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
       cameraPos -= up * speed;
 
-    const GLint bufW = mainWindow.getBufferWidth();
-    const GLint bufH = mainWindow.getBufferHeight();
-    if (bufW <= 0 || bufH <= 0)
-      continue;
+    // Build projection
+    glm::mat4 projection =
+        glm::perspective(glm::radians(fov),
+                         (GLfloat)mainWindow.getBufferWidth() /
+                             (GLfloat)mainWindow.getBufferHeight(),
+                         0.1f, 300.0f);
 
-    const glm::mat4 view = glm::lookAt(cameraPos, cameraPos + camDir, up);
-    const glm::mat4 proj = glm::perspective(
-        glm::radians(fov), static_cast<float>(bufW) / static_cast<float>(bufH),
-        0.1f, 300.0f);
+    // Build view matrix manually (week13 style: cameraRotateMat * cameraPosMat)
+    glm::vec3 cameraUp =
+        glm::normalize(glm::cross(cameraRight, cameraDirection));
 
-    // --- Pass 1: shadow depth ---
-    const glm::mat4 lightProj =
-        glm::ortho(-20.f, 20.f, -20.f, 20.f, 0.1f, 80.f);
-    const glm::mat4 lightView = glm::lookAt(lightPos, sceneTarget, up);
-    const glm::mat4 lightSpace = lightProj * lightView;
+    glm::mat4 cameraPosMat(1.0f);
+    cameraPosMat[3][0] = -cameraPos.x;
+    cameraPosMat[3][1] = -cameraPos.y;
+    cameraPosMat[3][2] = -cameraPos.z;
 
-    glViewport(0, 0, SHADOW_W, SHADOW_H);
+    glm::mat4 cameraRotateMat(1.0f);
+    cameraRotateMat[0] =
+        glm::vec4(cameraRight.x, cameraUp.x, -cameraDirection.x, 0.0f);
+    cameraRotateMat[1] =
+        glm::vec4(cameraRight.y, cameraUp.y, -cameraDirection.y, 0.0f);
+    cameraRotateMat[2] =
+        glm::vec4(cameraRight.z, cameraUp.z, -cameraDirection.z, 0.0f);
+
+    glm::mat4 view = cameraRotateMat * cameraPosMat;
+
+    // Light/shadow matrices — lightView points from moon toward building
+    const glm::vec3 sceneTarget(-1.5f, 0.0f, -10.0f);
+    glm::mat4 lightProjection =
+        glm::ortho(-20.0f, 20.0f, -20.0f, 20.0f, 0.1f, 80.0f);
+    glm::mat4 lightView = glm::lookAt(lightPos, sceneTarget, up);
+
+    glm::mat4 model = glm::mat4(1.0f);
+
+    // --- Pass 1: depth map (week13 style: depthShader with view+projection
+    // separate) ---
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
     glClear(GL_DEPTH_BUFFER_BIT);
-    RenderDepthPass(*shaderList[0], lightSpace);
 
-    // --- Pass 2: lit scene ---
+    depthShader->UseShader();
+    glUniformMatrix4fv(depthShader->GetUniformLocation("model"), 1, GL_FALSE,
+                       glm::value_ptr(model));
+    glUniformMatrix4fv(depthShader->GetUniformLocation("view"), 1, GL_FALSE,
+                       glm::value_ptr(lightView));
+    glUniformMatrix4fv(depthShader->GetUniformLocation("projection"), 1,
+                       GL_FALSE, glm::value_ptr(lightProjection));
+
+    glCullFace(GL_FRONT);
+    meshList[0]->RenderMesh();
+    glCullFace(GL_BACK);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, bufW, bufH);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    RenderLitPass(*shaderList[0], view, proj, lightSpace, lightDirection,
-                  cameraPos, lightColour, depthMap);
 
-    // Capture screenshot on 'P' key press (or during --screenshot-and-exit)
+    // --- Pass 2: lit scene (week13 style: main shader with lightPos + separate
+    // lightProjection/lightView) ---
+    glViewport(0, 0, mainWindow.getBufferWidth(), mainWindow.getBufferHeight());
+    glClearColor(0.55f, 0.65f, 0.78f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    shaderList[0]->UseShader();
+    glUniformMatrix4fv(shaderList[0]->GetUniformLocation("model"), 1, GL_FALSE,
+                       glm::value_ptr(model));
+    glUniformMatrix4fv(shaderList[0]->GetUniformLocation("view"), 1, GL_FALSE,
+                       glm::value_ptr(view));
+    glUniformMatrix4fv(shaderList[0]->GetUniformLocation("projection"), 1,
+                       GL_FALSE, glm::value_ptr(projection));
+    glUniformMatrix4fv(shaderList[0]->GetUniformLocation("lightProjection"), 1,
+                       GL_FALSE, glm::value_ptr(lightProjection));
+    glUniformMatrix4fv(shaderList[0]->GetUniformLocation("lightView"), 1,
+                       GL_FALSE, glm::value_ptr(lightView));
+    glUniform3fv(shaderList[0]->GetUniformLocation("lightColour"), 1,
+                 (GLfloat *)&lightColour);
+    glUniform3fv(shaderList[0]->GetUniformLocation("lightPos"), 1,
+                 (GLfloat *)&lightPos);
+    glUniform3fv(shaderList[0]->GetUniformLocation("viewPos"), 1,
+                 (GLfloat *)&cameraPos);
+    glUniform1i(shaderList[0]->GetUniformLocation("texture_data"), 0);
+    glUniform1i(shaderList[0]->GetUniformLocation("shadowMap"), 1);
+
+    // Bind shadow map to texture unit 1
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthMap);
+
+    // Render model with all submeshes using their respective materials &
+    // textures
+    GLint useTextureLoc = shaderList[0]->GetUniformLocation("useTexture");
+    GLint textureLoc = shaderList[0]->GetUniformLocation("texture_data");
+    GLint objectColourLoc = shaderList[0]->GetUniformLocation("objectColour");
+
+    meshList[0]->RenderWithMaterials(useTextureLoc, textureLoc,
+                                     objectColourLoc);
+
+    // Unbind textures
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // --- Moon (week13 lightShader style: flat colour sphere at lightPos) ---
+    lightShader->UseShader();
+    glm::mat4 moonModel = glm::mat4(1.0f);
+    moonModel = glm::translate(moonModel, lightPos);
+    moonModel =
+        glm::scale(moonModel, glm::vec3(0.4f, 0.4f, 0.4f)); // small moon
+    glUniformMatrix4fv(lightShader->GetUniformLocation("model"), 1, GL_FALSE,
+                       glm::value_ptr(moonModel));
+    glUniformMatrix4fv(lightShader->GetUniformLocation("view"), 1, GL_FALSE,
+                       glm::value_ptr(view));
+    glUniformMatrix4fv(lightShader->GetUniformLocation("projection"), 1,
+                       GL_FALSE, glm::value_ptr(projection));
+    glUniform3fv(lightShader->GetUniformLocation("lightColour"), 1,
+                 (GLfloat *)&lightColour);
+    meshList[1]->RenderMesh();
+
+    glUseProgram(0);
+    // end draw
+
+    // Screenshot on 'P' key
     frameCounter++;
     if (autoExit && frameCounter == 5) {
-      SaveScreenshot(SCREENSHOT_NAME, bufW, bufH);
+      SaveScreenshot(SCREENSHOT_NAME, mainWindow.getBufferWidth(),
+                     mainWindow.getBufferHeight());
     }
-    // Save once per key press instead of every frame while P is held
     static bool pWasDown = false;
     const bool pDown = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
     if (pDown && !pWasDown) {
-      SaveScreenshot(SCREENSHOT_NAME, bufW, bufH);
+      SaveScreenshot(SCREENSHOT_NAME, mainWindow.getBufferWidth(),
+                     mainWindow.getBufferHeight());
     }
     pWasDown = pDown;
 
     mainWindow.swapBuffers();
 
-    if (autoExit && frameCounter >= 10) {
+    if (autoExit && frameCounter >= 10)
       break;
-    }
   }
 
   glDeleteFramebuffers(1, &depthMapFBO);
