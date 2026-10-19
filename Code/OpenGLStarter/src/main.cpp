@@ -50,7 +50,7 @@ float yaw = 68.5f;
 float pitch = 13.5f;
 glm::vec3 lightColour = glm::vec3(0.9f, 0.95f, 1.0f); // Cool moonlight
 glm::vec3 lightPos =
-    glm::vec3(-1.5f, 3.5f, -8.0f); // In front of building, illuminates skeleton
+    glm::vec3(1.63f, 5.4f, -4.03f); // Bottom centre of lamp head (from OBJ vertices)
 glm::vec3 cameraPos = glm::vec3(-4.9f, 0.9f, -13.2f);
 
 // Default camera (week13 uses globals for these too)
@@ -128,49 +128,24 @@ void CreateObj(const std::filesystem::path &modelPath) {
   meshList.push_back(obj);
 }
 
-// Create a UV sphere (week13 cube equivalent: used as moon/light indicator)
-void CreateSphere(int stacks, int slices) {
-  std::vector<GLfloat> vertices;
-  std::vector<unsigned int> indices;
-  constexpr float pi = 3.14159265358979323846f;
-
-  for (int i = 0; i <= stacks; ++i) {
-    float phi = pi * i / stacks; // 0 .. PI
-    for (int j = 0; j <= slices; ++j) {
-      float theta = 2.0f * pi * j / slices; // 0 .. 2PI
-      float x = sinf(phi) * cosf(theta);
-      float y = cosf(phi);
-      float z = sinf(phi) * sinf(theta);
-      // pos (3) + texcoord (2) + normal (3)
-      vertices.push_back(x);
-      vertices.push_back(y);
-      vertices.push_back(z);
-      vertices.push_back((float)j / slices); // u
-      vertices.push_back((float)i / stacks); // v
-      vertices.push_back(x);                 // nx
-      vertices.push_back(y);                 // ny
-      vertices.push_back(z);                 // nz
-    }
-  }
-
-  for (int i = 0; i < stacks; ++i) {
-    for (int j = 0; j < slices; ++j) {
-      int a = i * (slices + 1) + j;
-      int b = a + slices + 1;
-      indices.push_back(a);
-      indices.push_back(b);
-      indices.push_back(a + 1);
-      indices.push_back(b);
-      indices.push_back(b + 1);
-      indices.push_back(a + 1);
-    }
-  }
-
-  Mesh *sphere = new Mesh();
-  sphere->CreateMesh(vertices.data(), indices.data(),
-                     (unsigned int)vertices.size(),
-                     (unsigned int)indices.size());
-  meshList.push_back(sphere); // index 1 = moon
+// Create a flat horizontal rectangle (week13 CreateMesh style: light panel under lamp)
+// Vertex layout: pos(3) + normal(3) + uv(2)  = 8 floats per vertex
+void CreateRect()
+{
+    GLfloat vertices[] = {
+        //  pos x     y     z       normal nx   ny   nz    uv u    v
+        -0.25f, 0.0f, -0.18f,   0.0f, -1.0f, 0.0f,   0.0f, 0.0f,
+         0.25f, 0.0f, -0.18f,   0.0f, -1.0f, 0.0f,   1.0f, 0.0f,
+         0.25f, 0.0f,  0.18f,   0.0f, -1.0f, 0.0f,   1.0f, 1.0f,
+        -0.25f, 0.0f,  0.18f,   0.0f, -1.0f, 0.0f,   0.0f, 1.0f,
+    };
+    unsigned int indices[] = {
+        0, 1, 2,
+        2, 3, 0,
+    };
+    Mesh* rect = new Mesh();
+    rect->CreateMesh(vertices, indices, 32, 6); // 4 verts * 8 floats = 32
+    meshList.push_back(rect); // index 1 = lamp panel
 }
 
 void CreateShaders() {
@@ -225,7 +200,7 @@ int main(int argc, char *argv[]) {
 
   // Load the project model (week13: CreateObj then CreateShaders)
   CreateObj(modelDirectory / "ModelFutureMe.obj");
-  CreateSphere(24, 24); // moon sphere (week13 cube equivalent)
+  CreateRect();  // lamp light panel rectangle (week13 cube equivalent)
   CreateShaders();
 
   if (meshList.empty() || shaderList.empty()) {
@@ -336,10 +311,10 @@ int main(int argc, char *argv[]) {
 
     glm::mat4 view = cameraRotateMat * cameraPosMat;
 
-    // Light/shadow matrices — lightView points from moon toward building
-    const glm::vec3 sceneTarget(-1.5f, 0.0f, -10.0f);
+    // Light/shadow matrices - lamp casts shadow downward below lamp head
+    const glm::vec3 sceneTarget(1.63f, 0.0f, -4.03f); // ground directly below lamp
     glm::mat4 lightProjection =
-        glm::ortho(-20.0f, 20.0f, -20.0f, 20.0f, 0.1f, 80.0f);
+        glm::ortho(-6.0f, 6.0f, -6.0f, 6.0f, 0.1f, 15.0f);
     glm::mat4 lightView = glm::lookAt(lightPos, sceneTarget, up);
 
     glm::mat4 model = glm::mat4(1.0f);
@@ -409,14 +384,13 @@ int main(int argc, char *argv[]) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // --- Moon (week13 lightShader style: flat colour sphere at lightPos) ---
+    // --- Lamp panel rect (week13 lightShader style: flat colour rect below lamp head) ---
     lightShader->UseShader();
-    glm::mat4 moonModel = glm::mat4(1.0f);
-    moonModel = glm::translate(moonModel, lightPos);
-    moonModel =
-        glm::scale(moonModel, glm::vec3(0.4f, 0.4f, 0.4f)); // small moon
+    glm::mat4 lampModel = glm::mat4(1.0f);
+    // Position rect just below the lamp head (0.12 units below lightPos)
+    lampModel = glm::translate(lampModel, lightPos + glm::vec3(0.0f, -0.12f, 0.0f));
     glUniformMatrix4fv(lightShader->GetUniformLocation("model"), 1, GL_FALSE,
-                       glm::value_ptr(moonModel));
+                       glm::value_ptr(lampModel));
     glUniformMatrix4fv(lightShader->GetUniformLocation("view"), 1, GL_FALSE,
                        glm::value_ptr(view));
     glUniformMatrix4fv(lightShader->GetUniformLocation("projection"), 1,
